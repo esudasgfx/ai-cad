@@ -72,7 +72,7 @@ export function usePlanWebSocket(planId: string): UseWebSocketReturn {
       if (wsBaseUrl) {
         wsUrl = `${wsBaseUrl}/plans/${planId}`
       } else {
-        const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8100'
         const wsProtocol = apiBaseUrl.startsWith('https:') ? 'wss:' : 'ws:'
         const wsHost = apiBaseUrl.replace(/^https?:\/\//, '')
         wsUrl = `${wsProtocol}//${wsHost}/ws/plans/${planId}`
