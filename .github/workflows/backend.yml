@@ -1,0 +1,29 @@
+name: Backend
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    env:
+      OPENAI_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai/
+      OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_MODEL_NAME: gemini-1.5-flash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Test backend
+        working-directory: backend
+        run: pytest tests/
