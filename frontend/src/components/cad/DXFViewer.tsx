@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import DxfParser from 'dxf-parser'
-import { Canvas, Line, Circle, Path, Text, Polyline, Rect } from 'fabric'
+import { Canvas, Line, Circle, Path, Text, Polyline } from 'fabric'
 
 // Fabric.js types (dynamic import)
 interface FabricCanvas {
@@ -46,10 +46,10 @@ interface DXFEntity {
   color: number
   handle: string
   coordinates?: number[]
-  startPoint?: number[]
-  endPoint?: number[]
+  startPoint?: PointTuple
+  endPoint?: PointTuple
   radius?: number
-  center?: number[]
+  center?: PointTuple
   angle?: number
   text?: string
   // Additional properties that might exist on parsed entities
@@ -59,7 +59,7 @@ interface DXFEntity {
   y1?: number
   x2?: number
   y2?: number
-  insertPoint?: number[]
+  insertPoint?: PointTuple
   vertices?: any[]
   points?: number[]
   startAngle?: number
@@ -91,6 +91,78 @@ interface DXFViewerProps {
   onLoad?: () => void
   onError?: (error: Error) => void
   className?: string
+}
+
+type PointTuple = [number, number]
+
+const isFiniteNumber = (value: unknown): value is number => (
+  typeof value === 'number' && Number.isFinite(value)
+)
+
+const toPointTuple = (point: any): PointTuple | undefined => {
+  if (!point) return undefined
+
+  if (Array.isArray(point) && isFiniteNumber(point[0]) && isFiniteNumber(point[1])) {
+    return [point[0], point[1]]
+  }
+
+  if (isFiniteNumber(point.x) && isFiniteNumber(point.y)) {
+    return [point.x, point.y]
+  }
+
+  return undefined
+}
+
+const toCoordinateArray = (points: any[] | undefined): number[] | undefined => {
+  if (!Array.isArray(points)) return undefined
+
+  const coordinates: number[] = []
+  points.forEach((point) => {
+    const tuple = toPointTuple(point)
+    if (tuple) coordinates.push(tuple[0], tuple[1])
+  })
+
+  return coordinates.length >= 2 ? coordinates : undefined
+}
+
+const updateBoundsWithPoint = (
+  bounds: DXFData['bounds'],
+  point: PointTuple | undefined
+) => {
+  if (!point) return
+
+  bounds.minX = Math.min(bounds.minX, point[0])
+  bounds.minY = Math.min(bounds.minY, point[1])
+  bounds.maxX = Math.max(bounds.maxX, point[0])
+  bounds.maxY = Math.max(bounds.maxY, point[1])
+}
+
+const updateBoundsWithCoordinates = (
+  bounds: DXFData['bounds'],
+  coordinates: number[] | undefined
+) => {
+  if (!coordinates || coordinates.length < 2) return
+
+  for (let i = 0; i < coordinates.length - 1; i += 2) {
+    const point: PointTuple = [coordinates[i], coordinates[i + 1]]
+    updateBoundsWithPoint(bounds, point)
+  }
+}
+
+const hasValidBounds = (bounds: DXFData['bounds']) => (
+  Number.isFinite(bounds.minX) &&
+  Number.isFinite(bounds.minY) &&
+  Number.isFinite(bounds.maxX) &&
+  Number.isFinite(bounds.maxY) &&
+  bounds.maxX > bounds.minX &&
+  bounds.maxY > bounds.minY
+)
+
+const normalizeAngleForPath = (angle: number | undefined): number | undefined => {
+  if (!isFiniteNumber(angle)) return undefined
+
+  // dxf-parser emits arc angles in radians; older/custom data may already use degrees.
+  return Math.abs(angle) <= Math.PI * 2 ? (angle * 180) / Math.PI : angle
 }
 
 export default function DXFViewer({ planId, onLoad, onError, className }: DXFViewerProps) {
@@ -167,15 +239,21 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
         
         // Extract coordinates based on entity type and parser structure
         let coordinates: number[] | undefined
-        let startPoint: number[] | undefined
-        let endPoint: number[] | undefined
+        let startPoint: PointTuple | undefined
+        let endPoint: PointTuple | undefined
+        let center: PointTuple | undefined = toPointTuple(entity.center)
+        let insertPoint: PointTuple | undefined = toPointTuple(entity.insertPoint)
         
         if (entity.type === 'LWPOLYLINE') {
           // LWPOLYLINE coordinates are often in vertices or points
           if (entity.vertices && Array.isArray(entity.vertices)) {
-            coordinates = entity.vertices.flatMap((v: any) => [v.x, v.y])
+            coordinates = toCoordinateArray(entity.vertices)
           } else if (entity.points && Array.isArray(entity.points)) {
-            coordinates = entity.points.flat()
+            coordinates = Array.isArray(entity.points[0])
+              ? entity.points.flat()
+              : entity.points.every(isFiniteNumber)
+                ? entity.points
+                : toCoordinateArray(entity.points)
           } else if (entity.coordinates && Array.isArray(entity.coordinates)) {
             coordinates = entity.coordinates
           }
@@ -193,12 +271,14 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
           
           // Try different coordinate storage patterns
           if (entity.vertices && Array.isArray(entity.vertices) && entity.vertices.length >= 2) {
-            startPoint = [entity.vertices[0].x, entity.vertices[0].y]
-            endPoint = [entity.vertices[1].x, entity.vertices[1].y]
-            coordinates = [startPoint[0], startPoint[1], endPoint[0], endPoint[1]]
+            startPoint = toPointTuple(entity.vertices[0])
+            endPoint = toPointTuple(entity.vertices[1])
+            if (startPoint && endPoint) {
+              coordinates = [startPoint[0], startPoint[1], endPoint[0], endPoint[1]]
+            }
           } else if (entity.startPoint && entity.endPoint) {
-            startPoint = entity.startPoint
-            endPoint = entity.endPoint
+            startPoint = toPointTuple(entity.startPoint)
+            endPoint = toPointTuple(entity.endPoint)
             if (startPoint && endPoint) {
               coordinates = [startPoint[0], startPoint[1], endPoint[0], endPoint[1]]
             }
@@ -222,14 +302,16 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
           console.log(`🔍 LINE points extracted - start:`, startPoint, 'end:', endPoint, 'coordinates:', coordinates)
         } else if (entity.type === 'ARC') {
           // ARC entities have center, radius, and angles
-          startPoint = entity.startPoint
-          endPoint = entity.endPoint
+          startPoint = toPointTuple(entity.startPoint)
+          endPoint = toPointTuple(entity.endPoint)
           console.log(`🔍 ARC data extracted - center:`, entity.center, 'radius:', entity.radius)
         } else {
           // For other entity types, use the original properties
           coordinates = entity.coordinates
-          startPoint = entity.startPoint
-          endPoint = entity.endPoint
+          startPoint = toPointTuple(entity.startPoint)
+          endPoint = toPointTuple(entity.endPoint)
+          center = toPointTuple(entity.center)
+          insertPoint = toPointTuple(entity.insertPoint)
         }
         
         const dxfEntity: DXFEntity = {
@@ -241,9 +323,12 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
           startPoint,
           endPoint,
           radius: entity.radius,
-          center: entity.center,
+          center,
           angle: entity.angle,
           text: entity.text,
+          insertPoint,
+          startAngle: normalizeAngleForPath(entity.startAngle),
+          endAngle: normalizeAngleForPath(entity.endAngle),
           // Store raw vertices for rendering fallback
           vertices: (entity as any).vertices,
           // Store the raw entity for deep debugging
@@ -260,41 +345,28 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
 
         entities.push(dxfEntity)
 
-        // Update bounds using extracted coordinates
-        if (startPoint) {
-          bounds.minX = Math.min(bounds.minX, startPoint[0])
-          bounds.minY = Math.min(bounds.minY, startPoint[1])
-          bounds.maxX = Math.max(bounds.maxX, startPoint[0])
-          bounds.maxY = Math.max(bounds.maxY, startPoint[1])
-        }
-        if (endPoint) {
-          bounds.minX = Math.min(bounds.minX, endPoint[0])
-          bounds.minY = Math.min(bounds.minY, endPoint[1])
-          bounds.maxX = Math.max(bounds.maxX, endPoint[0])
-          bounds.maxY = Math.max(bounds.maxY, endPoint[1])
-        }
-        if (entity.center) {
-          bounds.minX = Math.min(bounds.minX, entity.center[0] - (entity.radius || 0))
-          bounds.minY = Math.min(bounds.minY, entity.center[1] - (entity.radius || 0))
-          bounds.maxX = Math.max(bounds.maxX, entity.center[0] + (entity.radius || 0))
-          bounds.maxY = Math.max(bounds.maxY, entity.center[1] + (entity.radius || 0))
-        }
-        
-        // Update bounds from LWPOLYLINE coordinates
-        if (coordinates && coordinates.length >= 2) {
-          for (let i = 0; i < coordinates.length; i += 2) {
-            bounds.minX = Math.min(bounds.minX, coordinates[i])
-            bounds.minY = Math.min(bounds.minY, coordinates[i + 1])
-            bounds.maxX = Math.max(bounds.maxX, coordinates[i])
-            bounds.maxY = Math.max(bounds.maxY, coordinates[i + 1])
-          }
+        updateBoundsWithPoint(bounds, startPoint)
+        updateBoundsWithPoint(bounds, endPoint)
+
+        if (center) {
+          const radius = isFiniteNumber(entity.radius) ? entity.radius : 0
+          updateBoundsWithPoint(bounds, [center[0] - radius, center[1] - radius])
+          updateBoundsWithPoint(bounds, [center[0] + radius, center[1] + radius])
         }
 
+        updateBoundsWithCoordinates(bounds, coordinates)
+
         // Add to layer
-        const layer = layers.get(entity.layer || '0')
-        if (layer) {
-          layer.entities.push(dxfEntity)
+        const layerName = entity.layer || '0'
+        if (!layers.has(layerName)) {
+          layers.set(layerName, {
+            name: layerName,
+            color: dxfEntity.color,
+            visible: true,
+            entities: []
+          })
         }
+        layers.get(layerName)?.entities.push(dxfEntity)
       })
     }
 
@@ -303,6 +375,10 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
     layers.forEach((layer, name) => {
       initialVisibility[name] = true
     })
+
+    if (!hasValidBounds(bounds)) {
+      bounds = { minX: 0, minY: 0, maxX: 1, maxY: 1 }
+    }
 
     const result = {
       layers,
@@ -343,6 +419,14 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
     const canvasWidth = canvas.getWidth()
     const canvasHeight = canvas.getHeight()
     
+    if (!hasValidBounds(data.bounds)) {
+      setZoom(1)
+      canvas.setZoom(1)
+      canvas.absolutePan({ x: 0, y: 0 })
+      canvas.renderAll()
+      return
+    }
+    
     const contentWidth = (data.bounds.maxX - data.bounds.minX) * 10
     const contentHeight = (data.bounds.maxY - data.bounds.minY) * 10
     
@@ -356,12 +440,35 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
       boundsValid: data.bounds.maxX > data.bounds.minX && data.bounds.maxY > data.bounds.minY
     })
     
+    if (
+      !Number.isFinite(contentWidth) ||
+      !Number.isFinite(contentHeight) ||
+      contentWidth <= 0 ||
+      contentHeight <= 0 ||
+      canvasWidth <= padding * 2 ||
+      canvasHeight <= padding * 2
+    ) {
+      setZoom(1)
+      canvas.setZoom(1)
+      canvas.absolutePan({ x: 0, y: 0 })
+      canvas.renderAll()
+      return
+    }
+
     const scaleX = (canvasWidth - padding * 2) / contentWidth
     const scaleY = (canvasHeight - padding * 2) / contentHeight
     const scale = Math.min(scaleX, scaleY, 2) // Max zoom 2x
     
     console.log('🔍 DXF Viewer Debug: Calculated scale:', scale)
     
+    if (!Number.isFinite(scale) || scale <= 0) {
+      setZoom(1)
+      canvas.setZoom(1)
+      canvas.absolutePan({ x: 0, y: 0 })
+      canvas.renderAll()
+      return
+    }
+
     setZoom(scale)
     canvas.setZoom(scale)
     
@@ -449,7 +556,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
         endPoint: entity.endPoint
       })
       
-      if (!layerVisibility[entity.layer]) {
+      if (layerVisibility[entity.layer] === false) {
         console.log(`   Skipping entity ${index + 1} - layer ${entity.layer} not visible`)
         return
       }
@@ -526,14 +633,14 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
         case 'ARC':
           // Convert arc to path
           if (entity.center && entity.radius && 
-              (entity as any).startAngle !== undefined && 
-              (entity as any).endAngle !== undefined) {
+              entity.startAngle !== undefined && 
+              entity.endAngle !== undefined) {
             const path = createArcPath(
               entity.center[0] * scale + offsetX,
               entity.center[1] * scale + offsetY,
               entity.radius * scale,
-              (entity as any).startAngle,
-              (entity as any).endAngle
+              entity.startAngle,
+              entity.endAngle
             )
             fabricObject = new Path(path, {
               fill: 'transparent',
@@ -555,7 +662,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
           })
           
           // TEXT entities can store position in different ways
-          let textPosition: number[] | undefined = entity.startPoint
+          let textPosition: PointTuple | undefined = entity.startPoint
           if (!textPosition && entity.center) {
             textPosition = entity.center
           } else if (!textPosition && entity.x !== undefined && entity.y !== undefined) {
@@ -566,7 +673,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
           
           console.log(`🔍 TEXT position extracted:`, textPosition)
           
-          if (entity.text && textPosition && textPosition.length >= 2) {
+          if (entity.text && textPosition) {
             fabricObject = new Text(entity.text, {
               left: textPosition[0] * scale + offsetX,
               top: textPosition[1] * scale + offsetY,
@@ -682,23 +789,6 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
     console.log('   Canvas background:', canvas.backgroundColor)
     fabricCanvasRef.current = canvas
 
-    // Add a test rectangle to verify canvas is working
-    try {
-      const testRect = new Rect({
-        left: 50,
-        top: 50,
-        width: 100,
-        height: 100,
-        fill: 'red',
-        stroke: 'black',
-        strokeWidth: 2
-      })
-      canvas.add(testRect)
-      console.log('✅ Test rectangle added to canvas')
-    } catch (error) {
-      console.log('❌ Failed to add test rectangle:', error)
-    }
-
     // Render DXF entities
     console.log('🖼️ DXF Viewer Debug: Starting entity rendering...')
     renderDXFEntities(canvas, dxfData)
@@ -737,15 +827,15 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
   // Helper function to get color from AutoCAD color index
   const getColorFromIndex = (colorIndex: number): string => {
     const colors: Record<number, string> = {
-      1: '#ff0000', 2: '#ffff00', 3: '#00ff00', 4: '#00ffff',
-      5: '#0000ff', 6: '#ff00ff', 7: '#ffffff', 8: '#808080',
+      1: '#ff0000', 2: '#b59f00', 3: '#00aa00', 4: '#00aaaa',
+      5: '#0000ff', 6: '#ff00ff', 7: '#111827', 8: '#808080',
       9: '#404040', 10: '#ff8080', 11: '#ffff80', 12: '#80ff80',
       13: '#80ffff', 14: '#8080ff', 15: '#ff80ff', 16: '#c0c0c0',
       17: '#804040', 18: '#808000', 19: '#408000', 20: '#408080',
       21: '#004080', 22: '#404080', 23: '#800080', 24: '#804040',
-      25: '#ffffff'
+      25: '#111827'
     }
-    return colors[colorIndex] || '#ffffff'
+    return colors[colorIndex] || '#111827'
   }
 
   
@@ -908,14 +998,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
   }
 
   return (
-    <div className={`space-y-4 ${className}`} style={{ minHeight: '700px', border: '2px solid blue', margin: '10px' }}>
-      {/* Debug info */}
-      <div className="bg-yellow-100 p-2 text-xs">
-        Debug: Canvas Element={canvasRef.current ? 'EXISTS' : 'NULL'}, 
-        Fabric Canvas={fabricCanvasRef.current ? 'EXISTS' : 'NULL'}, 
-        DXF Data={dxfData ? `${dxfData.entities.length} entities` : 'NULL'}
-      </div>
-      
+    <div className={`space-y-4 ${className}`}>
       {/* Toolbar */}
       <div className="flex items-center justify-between p-2 bg-muted rounded-lg">
         <div className="flex items-center space-x-2">
@@ -954,7 +1037,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
         <div className="flex-1">
           <div 
             ref={containerRef}
-            className="border-4 border-green-500 rounded-lg overflow-hidden bg-white"
+            className="border rounded-lg overflow-hidden bg-white"
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
@@ -966,13 +1049,7 @@ export default function DXFViewer({ planId, onLoad, onError, className }: DXFVie
               position: 'relative'
             }}
           >
-            <canvas 
-              ref={canvasRef} 
-              style={{
-                border: '2px solid red',
-                display: 'block'
-              }}
-            />
+            <canvas ref={canvasRef} className="block" />
           </div>
         </div>
 
